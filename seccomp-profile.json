@@ -1,0 +1,9 @@
+{
+    "defaultAction": "SCMP_ACT_ALLOW",
+    "syscalls": [
+        {
+            "names": ["getuid", "geteuid", "getgid", "getegid"],
+            "action": "SCMP_ACT_NOTIFY"
+        }
+    ]
+}
