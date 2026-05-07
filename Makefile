@@ -12,7 +12,6 @@ export CGO_LDFLAGS=-L$(SECCOMP_PREFIX)/lib
 GOFLAGS=-tags netgo,osusergo -trimpath -buildmode=pie
 LDFLAGS=-ldflags "-s -w -extldflags '-static' -X main.version=$(VERSION)"
 
-
 all: build
 
 build:
