@@ -1,62 +1,99 @@
 package fuse
 
 import (
+	"context"
 	"syscall"
+	"time"
 
 	"github.com/converged-computing/usernetes-identity/internal/mapper"
+	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-type IdentityFileSystem struct {
-	fuse.RawFileSystem
-	Source string
+type IdentityNode struct {
+	fs.LoopbackNode
 	Mapper *mapper.Mapper
+	Source string
 }
 
-// SetAttr intercepts the chown/chmod calls from the container.
-func (fs *IdentityFileSystem) SetAttr(cancel <-chan struct{}, in *fuse.SetAttrIn, out *fuse.AttrOut) fuse.Status {
+// Lookup is called when resolving paths. If we don't intercept this, 
+// the kernel will cache the unmapped host UIDs.
+func (n *IdentityNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	inode, status := n.LoopbackNode.Lookup(ctx, name, out)
+	if status == 0 && inode != nil {
+		out.Attr.Uid = n.Mapper.ReverseMap(n.Source, out.Attr.Uid)
+	}
+	return inode, status
+}
+
+// Getattr ensures the container sees the identity it expects
+func (n *IdentityNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	status := n.LoopbackNode.Getattr(ctx, f, out)
+	if status == 0 {
+		out.Uid = n.Mapper.ReverseMap(n.Source, out.Uid)
+	}
+	return status
+}
+
+// Setattr intercepts the chown/chmod calls from the container
+func (n *IdentityNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	if in.Valid&fuse.FATTR_UID != 0 {
 		// Map the container UID to our 2K host range
-		hostUID := fs.Mapper.ToHost(in.Uid)
-
-		// Hardened: Perform the real syscall on the host
-		if err := syscall.Chown(fs.Source, int(hostUID), -1); err != nil {
-			return fuse.ToStatus(err)
-		}
+		in.Uid = n.Mapper.ToHost(in.Uid)
 	}
-	return fuse.OK
-}
-
-// GetAttr ensures the container sees the identity it expects (the "Lie")
-func (fs *IdentityFileSystem) GetAttr(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fuse.AttrOut) fuse.Status {
-	var st syscall.Stat_t
-	if err := syscall.Lstat(fs.Source, &st); err != nil {
-		return fuse.ToStatus(err)
-	}
-
-	out.FromStat(&st)
-
-	// Spoof the UID: Return the original container UID (e.g., 20000)
-	// instead of the host UID (e.g., 105)
-	out.Uid = fs.Mapper.ReverseMap(fs.Source, st.Uid)
-	return fuse.OK
+	// Let LoopbackNode apply the real syscall on the host via the translated attributes
+	return n.LoopbackNode.Setattr(ctx, f, in, out)
 }
 
 func Serve(source, mount string, m *mapper.Mapper) error {
-	fs := &IdentityFileSystem{
-		RawFileSystem: fuse.NewDefaultRawFileSystem(),
-		Source:        source,
-		Mapper:        m,
+	var stat syscall.Stat_t
+	if err := syscall.Stat(source, &stat); err != nil {
+		return err
 	}
 
-	server, err := fuse.NewServer(fs, mount, &fuse.MountOptions{
-		AllowOther: true,
-		Name:       "usernetes-identity",
-	})
+	rootData := &fs.LoopbackRoot{
+		Path: source,
+		Dev:  uint64(stat.Dev),
+	}
+	
+	// Ensure every file and directory in our FUSE mount uses IdentityNode
+	rootData.NewNode = func(root *fs.LoopbackRoot, parent *fs.Inode, name string, st *syscall.Stat_t) fs.InodeEmbedder {
+		return &IdentityNode{
+			LoopbackNode: fs.LoopbackNode{
+				RootData: root,
+			},
+			Mapper: m,
+			Source: source,
+		}
+	}
+
+	// Bootstrap the Root Node
+	rootNode := &IdentityNode{
+		LoopbackNode: fs.LoopbackNode{
+			RootData: rootData,
+		},
+		Mapper: m,
+		Source: source,
+	}
+
+	sec := time.Second
+	opts := &fs.Options{
+		MountOptions: fuse.MountOptions{
+			AllowOther: true,
+			Name:       "usernetes-identity",
+		},
+		EntryTimeout: &sec,
+		AttrTimeout:  &sec,
+	}
+
+	server, err := fs.Mount(mount, rootNode, opts)
 	if err != nil {
 		return err
 	}
 
-	server.Serve()
+	// fs.Mount spawns the background server immediately.
+	// Wait() blocks until the filesystem is unmounted.
+	server.Wait()
 	return nil
 }
+

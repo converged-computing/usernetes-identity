@@ -25,6 +25,17 @@ sudo apt-get update && sudo apt-get install libseccomp-dev
 
 ## Building
 
+If you need libseccomp:
+
+```bash
+wget https://github.com/seccomp/libseccomp/releases/download/v2.5.5/libseccomp-2.5.5.tar.gz
+tar -xzf libseccomp-2.5.5.tar.gz
+cd libseccomp-2.5.5
+./configure --enable-static GPERF=/bin/true --prefix=/usr/workspace/usernetes/install
+make
+make install
+```
+
 Clone!
 
 ```bash
@@ -35,6 +46,10 @@ Then use the Makfile:
 
 ```bash
 make
+```
+```bash
+chmod +x bin/usernetes-identity
+mv bin/usernetes-identity /usr/workspace/usernetes/install/bin/
 ```
 
 Note: The `-tags netgo,osusergo` flag is important to bypass glibc's dynamic NSS dependencies. I think without that if we built and moved it we would have a problem. I have not yet tried building and deploying elsewhere (but maybe could).
@@ -60,6 +75,20 @@ mount_program = "/home/your_user/.local/bin/usernetes-identity"
 mountopt = "nodev,nosuid"
 ```
 
+E.g.,
+
+```console
+[storage]
+  driver = "overlay"
+  runroot = "/var/tmp/sochat1/run-34633/containers"
+  graphroot = "/var/tmp/sochat1/config/containers/storage"
+[storage.options.overlay]
+  mount_program = "/usr/workspace/usernetes/install/bin/usernetes-identity"
+  mountopt = "nodev,nosuid"
+[storage.options.vfs]
+  ignore_chown_errors = "true"
+```
+
 Deploy the Seccomp Profile. Usernetes applies Seccomp profiles via the Kubelet. Create the profile in Kubelet's rootless data directory.
 
 ```console
@@ -82,28 +111,64 @@ hpc-profile.json:
 
 Start usernetes as you typically would. We assume the following user namespace mapping via build flags for the node:
 
-
 - 0:0:1 (Root is pinned)
 - 1:1:1999 (The 1,999 slot deterministic pool)
 - 65534:2000:2 (Nobody is pinned)
 
-And for a pod manifest, we need a seccomp profile:
+## Testing
+
+Here is a more manual test. Create a test alpine pod.
+
+```yaml
+# kubectl apply -f test-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: uid-test-pod
+spec:
+  containers:
+  - name: test-container
+    image: docker.io/library/alpine:latest
+    command: ["sleep", "infinity"]
+```
+
+Create uids for it.
+
+```bash
+kubectl exec uid-test-pod -- sh -c "
+>   touch /usernetes-fuse-test-1500
+>   chown 1500:1500 /usernetes-fuse-test-1500
+>   
+>   touch /usernetes-fuse-test-nobody
+>   chown 65534:65534 /usernetes-fuse-test-nobody
+>   
+>   ls -ln /usernetes-fuse-test-*
+> "
+-rw-r--r--    1 1500     1500             0 May  7 15:12 /usernetes-fuse-test-1500
+-rw-r--r--    1 65534    65534            0 May  7 15:12 /usernetes-fuse-test-nobody
+```
+
+And for a pod manifest, we need a seccomp profile. Here is to test.
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: hpc-workload
+  name: identity-test
 spec:
   securityContext:
+    # 1. Apply the Seccomp profile we created
     seccompProfile:
       type: Localhost
       localhostProfile: hpc-profile.json
+    # 2. Force the pod to run as a high UID
+    runAsUser: 60000
+    runAsGroup: 60000
   containers:
-  - name: hpc-app
-    image: my-registry/hpc-app:latest
+  - name: alpine
+    image: alpine:latest
     command: ["/bin/sh", "-c"]
-    args: ["id && mpirun ..."]
+    args: ["sleep 3600"]
 ```
 
 ## License
