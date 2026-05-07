@@ -115,6 +115,39 @@ Start usernetes as you typically would. We assume the following user namespace m
 - 1:1:1999 (The 1,999 slot deterministic pool)
 - 65534:2000:2 (Nobody is pinned)
 
+## Testing
+
+Here is a more manual test. Create a test alpine pod.
+
+```yaml
+# kubectl apply -f test-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: uid-test-pod
+spec:
+  containers:
+  - name: test-container
+    image: docker.io/library/alpine:latest
+    command: ["sleep", "infinity"]
+```
+
+Create uids for it.
+
+```bash
+kubectl exec uid-test-pod -- sh -c "
+>   touch /usernetes-fuse-test-1500
+>   chown 1500:1500 /usernetes-fuse-test-1500
+>   
+>   touch /usernetes-fuse-test-nobody
+>   chown 65534:65534 /usernetes-fuse-test-nobody
+>   
+>   ls -ln /usernetes-fuse-test-*
+> "
+-rw-r--r--    1 1500     1500             0 May  7 15:12 /usernetes-fuse-test-1500
+-rw-r--r--    1 65534    65534            0 May  7 15:12 /usernetes-fuse-test-nobody
+```
+
 And for a pod manifest, we need a seccomp profile. Here is to test.
 
 ```yaml
