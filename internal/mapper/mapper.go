@@ -1,6 +1,7 @@
 package mapper
 
 import (
+	"bytes"
 	"fmt"
 	"hash/fnv"
 	"strconv"
@@ -58,7 +59,9 @@ func (m *Mapper) ReverseID(path string, hostID uint32, attrName string) uint32 {
 	if int(size) > 0 {
 		buf := make([]byte, size)
 		syscall.Syscall6(syscall.SYS_GETXATTR, uintptr(unsafe.Pointer(pathPtr)), uintptr(unsafe.Pointer(attrPtr)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), 0, 0)
-		val, _ := strconv.ParseUint(string(buf), 10, 32)
+		// Trim null terminators or whitespace to ensure ParseUint succeeds
+		cleanBuf := string(bytes.Trim(buf, "\x00 "))
+		val, _ := strconv.ParseUint(cleanBuf, 10, 32)
 		return uint32(val)
 	}
 
