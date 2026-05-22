@@ -60,20 +60,20 @@ func (m *Mapper) ReverseID(path string, hostID uint32, attrName string) uint32 {
 		buf := make([]byte, size)
 		syscall.Syscall6(syscall.SYS_GETXATTR, uintptr(unsafe.Pointer(pathPtr)), uintptr(unsafe.Pointer(attrPtr)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), 0, 0)
 
-		// Parse the value, ensuring we handle potential null terminators from different FS types
-		cleanBuf := string(bytes.Split(buf, []byte{0})[0])
-		val, err := strconv.ParseUint(cleanBuf, 10, 32)
-		if err != nil {
-			return m.Cfg.ContainerMax
+		// Trim any null bytes or whitespace from the raw syscall buffer
+		cleanBuf := string(bytes.Trim(buf, "\x00 "))
+		if val, err := strconv.ParseUint(cleanBuf, 10, 32); err == nil {
+			return uint32(val)
 		}
-		return uint32(val)
 	}
 
 	// Fallback logic
 	if hostID == 0 {
 		return 0
 	}
-	return m.Cfg.ContainerMax
+	// If no xattr exists, return the hostID. This prevents the 65535 overflow
+	// for files that have not been virtualized yet.
+	return hostID
 }
 
 // StoreID persists the original container ID to the host file's xattrs.

@@ -22,11 +22,11 @@ type IdentityNode struct {
 func (n *IdentityNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	inode, status := n.LoopbackNode.Lookup(ctx, name, out)
 	if status == 0 && inode != nil {
-		// Resolve host path: Source Root + Node Path + File Name
-		relPath := filepath.Join(n.Inode.Path(nil), name)
-		p := filepath.Join(n.Source, relPath)
+		// Use the child inode's Path method to get its location relative to the mount root.
+		// We join this with n.Source to get the absolute host path for xattr lookups.
+		p := filepath.Join(n.Source, inode.Path(nil))
 
-		// Identity Spoofing: Overwrite host IDs with original identities
+		// Identity Virtualization: Replace host IDs with original identities from xattrs
 		out.Attr.Uid = n.Mapper.ReverseID(p, out.Attr.Uid, "user.usernetes.uid")
 		out.Attr.Gid = n.Mapper.ReverseID(p, out.Attr.Gid, "user.usernetes.gid")
 	}
@@ -37,9 +37,10 @@ func (n *IdentityNode) Lookup(ctx context.Context, name string, out *fuse.EntryO
 func (n *IdentityNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	status := n.LoopbackNode.Getattr(ctx, f, out)
 	if status == 0 {
+		// Access the embedded Inode field to get the relative path of the current node
 		p := filepath.Join(n.Source, n.Inode.Path(nil))
 
-		// Identity Virtualization: Ensure merged view shows 60000
+		// Overwrite the host-mapped IDs so the Pod sees 60000 instead of 1633 (or 65535)
 		out.Uid = n.Mapper.ReverseID(p, out.Uid, "user.usernetes.uid")
 		out.Gid = n.Mapper.ReverseID(p, out.Gid, "user.usernetes.gid")
 	}
@@ -53,20 +54,18 @@ func (n *IdentityNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.Se
 	if in.Valid&fuse.FATTR_UID != 0 {
 		origUID := in.Uid
 		in.Uid = n.Mapper.ToHost(in.Uid)
-		// Persist true ID to the specific file xattrs
 		n.Mapper.StoreID(p, "user.usernetes.uid", origUID)
 	}
 	if in.Valid&fuse.FATTR_GID != 0 {
 		origGID := in.Gid
 		in.Gid = n.Mapper.ToHost(in.Gid)
-		// Persist true GID to the specific file xattrs
 		n.Mapper.StoreID(p, "user.usernetes.gid", origGID)
 	}
 
 	// Let LoopbackNode apply the real syscall on the host via the translated attributes
 	status := n.LoopbackNode.Setattr(ctx, f, in, out)
 	if status == 0 {
-		// Spoof the response so the container sees its IDs immediately
+		// Spoof the returned attributes so 'ls' shows the container IDs immediately
 		out.Uid = n.Mapper.ReverseID(p, out.Uid, "user.usernetes.uid")
 		out.Gid = n.Mapper.ReverseID(p, out.Gid, "user.usernetes.gid")
 	}
