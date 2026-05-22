@@ -153,6 +153,70 @@ And ensure usernetes-identity is at that path.
 
 ## Testing
 
+```bash
+mkdir -p /tmp/u7s-test/{lower,upper,work,merged}
+touch /tmp/u7s-test/lower/test-file
+touch /tmp/u7s-test/merged/identity-check
+git pull && make && cp ./bin/usernetes-identity /tmp/sochat1/usernetes/
+fusermount -u /tmp/u7s-test/merged && cp usernetes-identity /usr/bin/ && bash /tmp/test.sh 
+```
+And test.sh
+
+```bash
+#!/bin/bash
+
+/usr/bin/usernetes-identity     -o lowerdir=/tmp/u7s-test/lower,upperdir=/tmp/u7s-test/upper,workdir=/tmp/u7s-test/work     /tmp/u7s-test/merged
+
+# 1. Create a file in the virtualized mount
+touch /tmp/u7s-test/merged/identity-check
+
+# 2. Change ownership to a high UID/GID (e.g., 60000)
+chown 60000:60000 /tmp/u7s-test/merged/identity-check
+
+# 3. Verify the "Virtual" view (Inside the mount)
+# If spoofing is working, this should show 60000.
+# If it shows 65535, the kernel doesn't recognize the ID.
+ls -ln /tmp/u7s-test/merged/identity-check
+
+# 4. Verify the "Real" view (On the host/upper directory)
+# This should show a hashed ID between 1 and 1999 (e.g., 1633)
+ls -ln /tmp/u7s-test/upper/identity-check
+
+# 5. Verify the Extended Attributes
+# This confirms the original UID is persisted to disk
+getfattr -d -m "user.usernetes.*" /tmp/u7s-test/upper/identity-check
+
+# Test UID hashing only
+touch /tmp/u7s-test/merged/test-uid
+chown 60000:0 /tmp/u7s-test/merged/test-uid
+ls -ln /tmp/u7s-test/upper/test-uid  # Should see mapped UID, GID 0
+
+# Test GID hashing only
+touch /tmp/u7s-test/merged/test-gid
+chown 0:60000 /tmp/u7s-test/merged/test-gid
+ls -ln /tmp/u7s-test/upper/test-gid  # Should see UID 0, mapped GID
+
+touch /tmp/u7s-test/merged/test-nobody
+chown 65534:65534 /tmp/u7s-test/merged/test-nobody
+ls -ln /tmp/u7s-test/upper/test-nobody # Should show UID 2000
+```
+
+This should be the correct output:
+
+```bash
+root@u7s-ipa8:/usernetes# bash /tmp/test.sh 
+-rw-r--r-- 1 60000 60000 0 May 22 11:27 /tmp/u7s-test/merged/identity-check
+-rw-r--r-- 1 1633 1633 0 May 22 11:27 /tmp/u7s-test/upper/identity-check
+getfattr: Removing leading '/' from absolute path names
+# file: tmp/u7s-test/upper/identity-check
+user.usernetes.gid="60000"
+user.usernetes.uid="60000"
+
+-rw-r--r-- 1 1633 0 0 May 22 11:27 /tmp/u7s-test/upper/test-uid
+-rw-r--r-- 1 0 1633 0 May 22 11:27 /tmp/u7s-test/upper/test-gid
+-rw-r--r-- 1 2000 2000 0 May 22 11:27 /tmp/u7s-test/upper/test-nobody
+```
+
 Here is a more manual test. Create a test alpine pod.
 
 ```yaml

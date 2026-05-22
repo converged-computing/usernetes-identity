@@ -31,17 +31,17 @@ func New(c Config) *Mapper {
 }
 
 // ToHost maps high container UIDs into the host's 2K window.
-func (m *Mapper) ToHost(cUID uint32) uint32 {
-	if cUID == 0 {
+func (m *Mapper) ToHost(cID uint32) uint32 {
+	if cID == 0 {
 		return 0
 	}
-	if cUID >= 65534 {
+	if cID >= 65534 {
 		return m.Cfg.HostNobody
 	}
 
 	size := m.Cfg.HostMax - m.Cfg.HostMin + 1
 	h := fnv.New32a()
-	h.Write([]byte(fmt.Sprint(cUID)))
+	h.Write([]byte(fmt.Sprint(cID)))
 	return m.Cfg.HostMin + (h.Sum32() % size)
 }
 
