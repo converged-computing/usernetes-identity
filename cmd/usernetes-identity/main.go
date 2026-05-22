@@ -17,10 +17,12 @@ import (
 	"github.com/converged-computing/usernetes-identity/internal/seccomp"
 )
 
+const Version = "0.0.1"
+
 func main() {
 
-	// We are setting this to determine if already running
-	if os.Getenv("_USERNETES_DAEMON") == "" {
+	// Daemonize if not already in the background and this isn't a probe
+	if os.Getenv("_USERNETES_DAEMON") == "" && !isProbe(os.Args) {
 		cmd := exec.Command(os.Args[0], os.Args[1:]...)
 		cmd.Env = append(os.Environ(), "_USERNETES_DAEMON=1")
 
@@ -55,9 +57,16 @@ func main() {
 	source := flag.String("source", "", "Host storage source")
 	mount := flag.String("mount", "", "FUSE mount point")
 	mountOptions := flag.String("o", "", "Standard FUSE mount options from Podman")
+	overlayPath := flag.String("overlay-bin", "fuse-overlayfs", "Path to the real fuse-overlayfs binary")
 	logPath := flag.String("log", defaultLog, "Path to log file")
+	version := flag.Bool("version", false, "Print version and exit")
 
 	flag.Parse()
+
+	if *version {
+		fmt.Printf("usernetes-identity version %s\n", Version)
+		os.Exit(0)
+	}
 
 	f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
@@ -93,7 +102,7 @@ func main() {
 				}
 			}
 			safeOpts := strings.Join(overlayOpts, ",")
-			overlayCmd = exec.Command("fuse-overlayfs", "-f", "-o", safeOpts, stagingDir)
+			overlayCmd = exec.Command(*overlayPath, "-f", "-o", safeOpts, stagingDir)
 			overlayCmd.Stdout = f // Pipe fuse-overlayfs logs to our debug log
 			overlayCmd.Stderr = f
 
@@ -221,4 +230,14 @@ func getMountTarget(args []string) string {
 		return args[len(args)-1]
 	}
 	return ""
+}
+
+// isProbe detects if the binary is being called for version/capability checks
+func isProbe(args []string) bool {
+	for _, arg := range args {
+		if arg == "--version" || arg == "-v" || arg == "-V" || arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
 }

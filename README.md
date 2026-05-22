@@ -149,7 +149,16 @@ version = 2
       [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.test-handler.options]
         SystemdCgroup = true
 ```
-And ensure usernetes-identity is at that path.
+
+And ensure usernetes-identity is at that path. Debugging containerd and the setup:
+
+```bash
+# On the inside for containerd
+journalctl -u containerd -n 100
+
+# Outside for the cluster (e.g., kubelet)
+make logs
+```
 
 ## Testing
 

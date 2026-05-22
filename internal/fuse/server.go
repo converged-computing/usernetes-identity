@@ -51,22 +51,24 @@ func (n *IdentityNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 func (n *IdentityNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	p := filepath.Join(n.Source, n.Inode.Path(nil))
 
+	var originalUID, originalGID uint32
 	if in.Valid&fuse.FATTR_UID != 0 {
+		originalUID = in.Uid
 		in.Uid = n.Mapper.ToHost(in.Uid)
 	}
 	if in.Valid&fuse.FATTR_GID != 0 {
+		originalGID = in.Gid
 		in.Gid = n.Mapper.ToHost(in.Gid)
 	}
 
 	// Let LoopbackNode apply the real syscall on the host via the translated attributes
 	status := n.LoopbackNode.Setattr(ctx, f, in, out)
 	if status == 0 {
-		// Only persist the virtualization metadata if the host operation succeeded
 		if in.Valid&fuse.FATTR_UID != 0 {
-			n.Mapper.StoreID(p, "user.usernetes.uid", in.Uid)
+			n.Mapper.StoreID(p, "user.usernetes.uid", originalUID)
 		}
 		if in.Valid&fuse.FATTR_GID != 0 {
-			n.Mapper.StoreID(p, "user.usernetes.gid", in.Gid)
+			n.Mapper.StoreID(p, "user.usernetes.gid", originalGID)
 		}
 		// Spoof the returned attributes so 'ls' shows the container IDs immediately
 		out.Uid = n.Mapper.ReverseID(p, out.Uid, "user.usernetes.uid")
