@@ -16,12 +16,15 @@ type IdentityNode struct {
 	Source string
 }
 
-// Lookup is called when resolving paths. If we don't intercept this, 
+// Lookup is called when resolving paths. If we don't intercept this,
 // the kernel will cache the unmapped host UIDs.
 func (n *IdentityNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	inode, status := n.LoopbackNode.Lookup(ctx, name, out)
 	if status == 0 && inode != nil {
-		out.Attr.Uid = n.Mapper.ReverseMap(n.Source, out.Attr.Uid)
+		// Spoof attributes so the container sees the original identity.
+		// We use n.Source as the base for our identity lookups.
+		out.Attr.Uid = n.Mapper.ReverseID(n.Source, out.Attr.Uid, "user.usernetes.uid")
+		out.Attr.Gid = n.Mapper.ReverseID(n.Source, out.Attr.Gid, "user.usernetes.gid")
 	}
 	return inode, status
 }
@@ -30,7 +33,9 @@ func (n *IdentityNode) Lookup(ctx context.Context, name string, out *fuse.EntryO
 func (n *IdentityNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	status := n.LoopbackNode.Getattr(ctx, f, out)
 	if status == 0 {
-		out.Uid = n.Mapper.ReverseMap(n.Source, out.Uid)
+		// Ensure the 'merged' view shows the container's expected UID/GID
+		out.Uid = n.Mapper.ReverseID(n.Source, out.Uid, "user.usernetes.uid")
+		out.Gid = n.Mapper.ReverseID(n.Source, out.Gid, "user.usernetes.gid")
 	}
 	return status
 }
@@ -38,11 +43,26 @@ func (n *IdentityNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 // Setattr intercepts the chown/chmod calls from the container
 func (n *IdentityNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	if in.Valid&fuse.FATTR_UID != 0 {
-		// Map the container UID to our 2K host range
+		orig := in.Uid
 		in.Uid = n.Mapper.ToHost(in.Uid)
+		// Persist the original UID to xattrs
+		n.Mapper.StoreID(n.Source, "user.usernetes.uid", orig)
 	}
+	if in.Valid&fuse.FATTR_GID != 0 {
+		orig := in.Gid
+		in.Gid = n.Mapper.ToHost(in.Gid)
+		// Persist the original GID to xattrs
+		n.Mapper.StoreID(n.Source, "user.usernetes.gid", orig)
+	}
+
 	// Let LoopbackNode apply the real syscall on the host via the translated attributes
-	return n.LoopbackNode.Setattr(ctx, f, in, out)
+	status := n.LoopbackNode.Setattr(ctx, f, in, out)
+	if status == 0 {
+		// Spoof the returned attributes so the container sees the change as successful
+		out.Uid = n.Mapper.ReverseID(n.Source, out.Uid, "user.usernetes.uid")
+		out.Gid = n.Mapper.ReverseID(n.Source, out.Gid, "user.usernetes.gid")
+	}
+	return status
 }
 
 func Serve(source, mount string, m *mapper.Mapper) error {
@@ -55,7 +75,7 @@ func Serve(source, mount string, m *mapper.Mapper) error {
 		Path: source,
 		Dev:  uint64(stat.Dev),
 	}
-	
+
 	// Ensure every file and directory in our FUSE mount uses IdentityNode
 	rootData.NewNode = func(root *fs.LoopbackRoot, parent *fs.Inode, name string, st *syscall.Stat_t) fs.InodeEmbedder {
 		return &IdentityNode{
@@ -96,4 +116,3 @@ func Serve(source, mount string, m *mapper.Mapper) error {
 	server.Wait()
 	return nil
 }
-

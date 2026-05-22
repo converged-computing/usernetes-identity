@@ -89,13 +89,8 @@ E.g.,
   ignore_chown_errors = "true"
 ```
 
-Deploy the Seccomp Profile. Usernetes applies Seccomp profiles via the Kubelet. Create the profile in Kubelet's rootless data directory.
+Note that the seccomp profile is added to the container in the kubelet rootless data directory `/var/lib/kubelet/seccomp/`. It looks like this:
 
-```console
-mkdir -p ~/.local/share/usernetes/kubelet/seccomp/
-vim ~/.local/share/usernetes/kubelet/seccomp/hpc-profile.json
-hpc-profile.json:
-```
 ```console
 {
     "defaultAction": "SCMP_ACT_ALLOW",
@@ -114,6 +109,47 @@ Start usernetes as you typically would. We assume the following user namespace m
 - 0:0:1 (Root is pinned)
 - 1:1:1999 (The 1,999 slot deterministic pool)
 - 65534:2000:2 (Nobody is pinned)
+
+When you bring up the control plane node, you need to update the config.toml inside (before install-calico) to be:
+
+```bash
+# explicitly use v2 config format
+version = 2
+
+# 1. Snapshotter Configuration
+[plugins."io.containerd.snapshotter.v1.fuse-overlayfs"]
+  binary_path = "/usr/bin/usernetes-identity"
+  # Optional: explicitly set the root for snapshot data
+  root_path = "/var/lib/containerd/io.containerd.snapshotter.v1.fuse-overlayfs"
+
+# 2. CRI Plugin Configuration
+[plugins."io.containerd.grpc.v1.cri"]
+  # Use fixed sandbox image for stability in HPC/rootless
+  sandbox_image = "registry.k8s.io/pause:3.10"
+  tolerate_missing_hugepages_controller = true
+  # Mandatory for rootless (UserNS)
+  restrict_oom_score_adj = true
+
+  [plugins."io.containerd.grpc.v1.cri".containerd]
+    # Link CRI to your identity-aware snapshotter
+    snapshotter = "fuse-overlayfs"
+    discard_unpacked_layers = true
+    default_runtime_name = "runc"
+
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+      runtime_type = "io.containerd.runc.v2"
+      base_runtime_spec = "/etc/containerd/cri-base.json"
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+        SystemdCgroup = true
+
+    # Runtime class for Kubernetes tests
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.test-handler]
+      runtime_type = "io.containerd.runc.v2"
+      base_runtime_spec = "/etc/containerd/cri-base.json"
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.test-handler.options]
+        SystemdCgroup = true
+```
+And ensure usernetes-identity is at that path.
 
 ## Testing
 

@@ -3,6 +3,7 @@ package mapper
 import (
 	"fmt"
 	"hash/fnv"
+	"strconv"
 	"syscall"
 	"unsafe"
 )
@@ -43,11 +44,8 @@ func (m *Mapper) ToHost(cUID uint32) uint32 {
 	return m.Cfg.HostMin + (h.Sum32() % size)
 }
 
-// ReverseMap retrieves the original UID from xattrs or defaults to a safe value.
-func (m *Mapper) ReverseMap(path string, hostUID uint32) uint32 {
-	buf := make([]byte, 16)
-	attrName := "user.usernetes.uid"
-
+// ReverseID retrieves the original ID from xattrs or defaults to a safe value.
+func (m *Mapper) ReverseID(path string, hostID uint32, attrName string) uint32 {
 	// xattr retrieval using direct syscall to avoid CGO overhead
 	pathPtr, _ := syscall.BytePtrFromString(path)
 	attrPtr, _ := syscall.BytePtrFromString(attrName)
@@ -55,27 +53,25 @@ func (m *Mapper) ReverseMap(path string, hostUID uint32) uint32 {
 	size, _, _ := syscall.Syscall6(syscall.SYS_GETXATTR,
 		uintptr(unsafe.Pointer(pathPtr)),
 		uintptr(unsafe.Pointer(attrPtr)),
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(len(buf)), 0, 0)
+		0, 0, 0, 0)
 
 	if int(size) > 0 {
-		var orig uint32
-		if _, err := fmt.Sscanf(string(buf[:size]), "%d", &orig); err == nil {
-			return orig
-		}
+		buf := make([]byte, size)
+		syscall.Syscall6(syscall.SYS_GETXATTR, uintptr(unsafe.Pointer(pathPtr)), uintptr(unsafe.Pointer(attrPtr)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), 0, 0)
+		val, _ := strconv.ParseUint(string(buf), 10, 32)
+		return uint32(val)
 	}
 
 	// Fallback logic
-	if hostUID == 0 {
+	if hostID == 0 {
 		return 0
 	}
 	return m.Cfg.ContainerMax
 }
 
-// StoreUID persists the original container UID to the host file's xattrs.
-func (m *Mapper) StoreUID(path string, cUID uint32) error {
-	attrName := "user.usernetes.uid"
-	val := fmt.Sprintf("%d", cUID)
+// StoreID persists the original container ID to the host file's xattrs.
+func (m *Mapper) StoreID(path string, attrName string, id uint32) error {
+	val := fmt.Sprintf("%d", id)
 
 	pathPtr, _ := syscall.BytePtrFromString(path)
 	attrPtr, _ := syscall.BytePtrFromString(attrName)
