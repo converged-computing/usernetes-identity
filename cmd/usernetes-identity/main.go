@@ -57,7 +57,7 @@ func main() {
 	source := flag.String("source", "", "Host storage source")
 	mount := flag.String("mount", "", "FUSE mount point")
 	mountOptions := flag.String("o", "", "Standard FUSE mount options from Podman")
-	overlayPath := flag.String("overlay-bin", "fuse-overlayfs", "Path to the real fuse-overlayfs binary")
+	overlayPath := flag.String("overlay-bin", "/usr/bin/fuse-overlayfs.real", "Path to the real fuse-overlayfs binary")
 	logPath := flag.String("log", defaultLog, "Path to log file")
 	version := flag.Bool("version", false, "Print version and exit")
 
@@ -146,8 +146,8 @@ func main() {
 	m := mapper.New(mapper.Config{
 		HostMin:      uint32(*hostMin),
 		HostMax:      uint32(*hostMax),
-		HostNobody:   uint32(*hostNobody),
 		ContainerMax: uint32(*contMax),
+		HostNobody:   uint32(*hostNobody),
 	})
 
 	// Seccomp Supervisor
