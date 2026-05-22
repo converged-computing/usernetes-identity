@@ -22,9 +22,10 @@ type IdentityNode struct {
 func (n *IdentityNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	inode, status := n.LoopbackNode.Lookup(ctx, name, out)
 	if status == 0 && inode != nil {
-		// Calculate the host path for the specific file found
+		// Ensure we are targeting the specific file, not just the root (Source)
+		// n.Inode.Path(nil) returns the path relative to the mount root
 		p := filepath.Join(n.Source, n.Inode.Path(nil), name)
-		// Overwrite host IDs with original identities from xattrs
+
 		out.Attr.Uid = n.Mapper.ReverseID(p, out.Attr.Uid, "user.usernetes.uid")
 		out.Attr.Gid = n.Mapper.ReverseID(p, out.Attr.Gid, "user.usernetes.gid")
 	}
@@ -36,7 +37,8 @@ func (n *IdentityNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 	status := n.LoopbackNode.Getattr(ctx, f, out)
 	if status == 0 {
 		p := filepath.Join(n.Source, n.Inode.Path(nil))
-		// Virtualize the attributes so the Pod sees 60000 instead of 1633 (or 65535)
+
+		// Overwrite host-mapped IDs with virtual identities from xattrs
 		out.Uid = n.Mapper.ReverseID(p, out.Uid, "user.usernetes.uid")
 		out.Gid = n.Mapper.ReverseID(p, out.Gid, "user.usernetes.gid")
 	}
@@ -48,15 +50,16 @@ func (n *IdentityNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.Se
 	p := filepath.Join(n.Source, n.Inode.Path(nil))
 
 	if in.Valid&fuse.FATTR_UID != 0 {
-		orig := in.Uid
+		origUID := in.Uid
 		in.Uid = n.Mapper.ToHost(in.Uid)
-		// Persist the true identity to the specific host file
-		n.Mapper.StoreID(p, "user.usernetes.uid", orig)
+		// Persist original UID to the specific file's xattrs
+		n.Mapper.StoreID(p, "user.usernetes.uid", origUID)
 	}
 	if in.Valid&fuse.FATTR_GID != 0 {
-		orig := in.Gid
+		origGID := in.Gid
 		in.Gid = n.Mapper.ToHost(in.Gid)
-		n.Mapper.StoreID(p, "user.usernetes.gid", orig)
+		// Persist original GID to the specific file's xattrs
+		n.Mapper.StoreID(p, "user.usernetes.gid", origGID)
 	}
 
 	// Let LoopbackNode apply the real syscall on the host via the translated attributes
