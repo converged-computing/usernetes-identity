@@ -21,40 +21,17 @@ const Version = "0.0.1"
 
 func main() {
 
-	// Daemonize if not already in the background and this isn't a probe
-	if os.Getenv("_USERNETES_DAEMON") == "" && !isProbe(os.Args) {
-		cmd := exec.Command(os.Args[0], os.Args[1:]...)
-		cmd.Env = append(os.Environ(), "_USERNETES_DAEMON=1")
-
-		if err := cmd.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to start background daemon: %v\n", err)
-			os.Exit(1)
-		}
-
-		target := getMountTarget(os.Args)
-
-		// Give the parent 10 seconds (100 * 100ms) to avoid racing
-		// with the child's own 5-second fuse-overlayfs wait.
-		for i := 0; i < 100; i++ {
-			if isMounted(target) {
-				os.Exit(0)
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		fmt.Fprintf(os.Stderr, "Timeout waiting for background mount at %s\n", target)
-		os.Exit(1)
-	}
-
 	user := os.Getenv("USER")
 	if user == "" {
 		user = "unknown"
 	}
+
 	defaultLog := filepath.Join(os.TempDir(), fmt.Sprintf("usernetes-identity-%s.log", user))
 	hostMin := flag.Uint("host-min", mapper.DefaultHostMin, "Start of host ID range")
 	hostMax := flag.Uint("host-max", mapper.DefaultHostMax, "End of host ID range")
 	hostNobody := flag.Uint("host-nobody", mapper.DefaultHostNobody, "Host ID for 'nobody'")
 	contMax := flag.Uint("cont-max", mapper.DefaultContainerMax, "Max container UID")
-	source := flag.String("source", "", "Host storage source")
+	source := flag.String("source", "", "Host storage source (physical directory)")
 	mount := flag.String("mount", "", "FUSE mount point")
 	mountOptions := flag.String("o", "", "Standard FUSE mount options from Podman")
 	overlayPath := flag.String("overlay-bin", "/usr/bin/fuse-overlayfs.real", "Path to the real fuse-overlayfs binary")
@@ -66,6 +43,39 @@ func main() {
 	if *version {
 		fmt.Printf("usernetes-identity version %s\n", Version)
 		os.Exit(0)
+	}
+
+	// Resolve the mount target. FUSE helpers usually receive the target
+	// as the last positional argument if not provided via flags.
+	if *mount == "" && flag.NArg() > 0 {
+		*mount = flag.Arg(flag.NArg() - 1)
+	}
+
+	// Daemonize if not already in the background.
+	// Standard help/version probes are handled above and exit before reaching here.
+	if os.Getenv("_USERNETES_DAEMON") == "" {
+		cmd := exec.Command(os.Args[0], os.Args[1:]...)
+		cmd.Env = append(os.Environ(), "_USERNETES_DAEMON=1")
+
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to start background daemon: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Give the parent 10 seconds (100 * 100ms) to avoid racing
+		// with the child's own initialization.
+		for i := 0; i < 100; i++ {
+			if *mount != "" && isMounted(*mount) {
+				os.Exit(0)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if *mount != "" {
+			fmt.Fprintf(os.Stderr, "Timeout waiting for background mount at %s\n", *mount)
+		} else {
+			fmt.Fprintf(os.Stderr, "Daemon started but no mount target was identified to verify status.\n")
+		}
+		os.Exit(1)
 	}
 
 	f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -83,10 +93,6 @@ func main() {
 	if *mountOptions != "" {
 		log.Printf("Parsing Podman options: %s", *mountOptions)
 		opts := parseOptions(*mountOptions)
-
-		if flag.NArg() > 0 && *mount == "" {
-			*mount = flag.Arg(0)
-		}
 
 		if _, hasLower := opts["lowerdir"]; hasLower {
 			log.Printf("OverlayFS Union requested. Delegating to fuse-overlayfs...")
@@ -218,26 +224,4 @@ func isMounted(path string) bool {
 	}
 	// A directory is a mount point if its device ID differs from its parent.
 	return sys1.Dev != sys2.Dev || sys1.Ino == sys2.Ino
-}
-
-func getMountTarget(args []string) string {
-	for i, arg := range args {
-		if arg == "-mount" && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	if len(args) > 1 && !strings.HasPrefix(args[len(args)-1], "-") {
-		return args[len(args)-1]
-	}
-	return ""
-}
-
-// isProbe detects if the binary is being called for version/capability checks
-func isProbe(args []string) bool {
-	for _, arg := range args {
-		if arg == "--version" || arg == "-v" || arg == "-V" || arg == "-h" || arg == "--help" {
-			return true
-		}
-	}
-	return false
 }
