@@ -8,11 +8,11 @@ It achieves this through a "Double Proxy" architecture:
 
 1. **Filesystem Identity (FUSE):** A FUSE daemon that deterministically maps container UIDs to the host pool and persists the true UID in extended attributes (xattrs).
 2. **Process Identity (Seccomp):** A Seccomp-notify supervisor that intercepts identity syscalls (e.g., `getuid`) and spoofs the return values so HPC runtimes (like MPI) see the IDs they expect.
+3. **NRI Plugin**: A node resource interface that will
 
 ## How does it work?
 
-We map high UIDs ($0-65535$) into a small host pool ($1-1999$) using a stable hash. Node A and Node B will always map Container UID 500 to the exact same Host UID, preserving HPC fabric integrity without a centralized database. File ownership collisions are resolved by storing the original Container UID in `user.usernetes.uid`. We build with statically linked CGO (`libseccomp`) and pure-Go networking/user resolvers, ensuring it runs on any HPC node regardless of local `glibc` versions. Finally, the Seccomp supervisor validates PID lifecycles before responding to notifications to prevent PID-reuse attacks.
-
+We map high UIDs ($0-65535$) into a small host pool ($1-1999$) using a stable hash. Node A and Node B will always map Container UID 500 to the exact same Host UID without a centralized database. File ownership collisions are resolved by storing the original Container UID in `user.usernetes.uid`. We build with statically linked CGO (`libseccomp`) and pure-Go networking/user resolvers, ensuring it runs on any HPC node regardless of local `glibc` versions. The Seccomp supervisor handles syscalls, and NRI handles.
 
 ## Prerequisites
 
@@ -23,7 +23,9 @@ We map high UIDs ($0-65535$) into a small host pool ($1-1999$) using a stable ha
 sudo apt-get update && sudo apt-get install libseccomp-dev
 ```
 
-## Building
+## Setup
+
+### Building
 
 If you need libseccomp:
 
@@ -48,19 +50,21 @@ Then use the Makfile:
 make
 ```
 ```bash
-chmod +x bin/usernetes-identity
+chmod +x ./bin/usernetes-identity ./bin/usernetes-identity-nri
 mv bin/usernetes-identity /usr/workspace/usernetes/install/bin/
 ```
 
 Note: The `-tags netgo,osusergo` flag is important to bypass glibc's dynamic NSS dependencies. I think without that if we built and moved it we would have a problem. I have not yet tried building and deploying elsewhere (but maybe could).
 
-## Deployment (Control Plane)
 
-Deploying to a Usernetes node requires configuring both the container storage layer and the Kubelet. First, install the binary.
+### Deployment (Control Plane)
+
+Deploying to a Usernetes node requires configuring both the container storage layer and the Kubelet. We will eventually have the kubelet stuff built into the Usernetes "node" container. For now, first, install the binary.
 
 ```bash
 mkdir -p ~/.local/bin
-cp bin/usernetes-identity ~/.local/bin/usernetes-identity
+cp ./bin/usernetes-identity ~/.local/bin/usernetes-identity
+cp ./bin/usernetes-identity-nri ~/.local/bin/usernetes-identity-nri
 chmod 755 ~/.local/bin/usernetes-identity
 ```
 
@@ -89,7 +93,7 @@ E.g.,
   ignore_chown_errors = "true"
 ```
 
-Note that the seccomp profile is added to the container in the kubelet rootless data directory `/var/lib/kubelet/seccomp/`. It looks like this:
+Note that the seccomp profile is already added to the container in the kubelet rootless data directory `/var/lib/kubelet/seccomp/`. It looks like this:
 
 ```console
 {
@@ -110,28 +114,35 @@ Start usernetes as you typically would. We assume the following user namespace m
 - 1:1:1999 (The 1,999 slot deterministic pool)
 - 65534:2000:2 (Nobody is pinned)
 
+### Configuration
+
 When you bring up the control plane node, you need to update the config.toml inside (before install-calico) to be:
 
 ```bash
 # explicitly use v2 config format
 version = 2
 
-# 1. Snapshotter Configuration
+# 1. Proxy Plugin Configuration (This is the Usernetes way)
+# This points containerd to the socket where usernetes-identity/fuse-overlayfs is listening
+[proxy_plugins]
+  [proxy_plugins."fuse-overlayfs"]
+    type = "snapshot"
+    address = "/run/containerd-fuse-overlayfs.sock"
+
+# 2. Fix for ImageGCFailed
+# We must explicitly define the snapshotter root path so the Kubelet GC
+# can find the directory to calculate disk usage stats.
 [plugins."io.containerd.snapshotter.v1.fuse-overlayfs"]
-  binary_path = "/usr/bin/usernetes-identity"
-  # Optional: explicitly set the root for snapshot data
   root_path = "/var/lib/containerd/io.containerd.snapshotter.v1.fuse-overlayfs"
 
-# 2. CRI Plugin Configuration
+# 3. CRI Plugin Configuration
 [plugins."io.containerd.grpc.v1.cri"]
-  # Use fixed sandbox image for stability in HPC/rootless
   sandbox_image = "registry.k8s.io/pause:3.10"
   tolerate_missing_hugepages_controller = true
-  # Mandatory for rootless (UserNS)
   restrict_oom_score_adj = true
 
   [plugins."io.containerd.grpc.v1.cri".containerd]
-    # Link CRI to your identity-aware snapshotter
+    # Use the name defined in [proxy_plugins]
     snapshotter = "fuse-overlayfs"
     discard_unpacked_layers = true
     default_runtime_name = "runc"
@@ -142,12 +153,11 @@ version = 2
       [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
         SystemdCgroup = true
 
-    # Runtime class for Kubernetes tests
-    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.test-handler]
-      runtime_type = "io.containerd.runc.v2"
-      base_runtime_spec = "/etc/containerd/cri-base.json"
-      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.test-handler.options]
-        SystemdCgroup = true
+# Enable NRI (Required to programmatically squash to 2048 UID range)
+[plugins."io.containerd.nri.v1.nri"]
+  disable = false
+  disable_connections = false
+  plugin_path = "/opt/nri/plugins"
 ```
 
 And ensure usernetes-identity is at that path. Debugging containerd and the setup:
@@ -160,7 +170,29 @@ journalctl -u containerd -n 100
 make logs
 ```
 
-## Testing
+### NRI
+
+The NRI plugin, akin to our other strategies here, needs to squash container UIDs into the host range.
+
+To use `usernetes-identity` in these environments, you must use the included NRI plugin to "squash" container UIDs into your host range. The reason this is different from fuse (filesystem) and seccomp (syscalls) is that it is handling the config.json files that are ultimately written by runc for the containers. If we do not have the NRI plugin, these can be incorrectly written and the setup will never work. We need to enable it in the config.toml (already done above)
+
+```toml
+[plugins."io.containerd.nri.v1.nri"]
+  disable = false
+  plugin_path = "/opt/nri/plugins"
+```
+
+And then this will need to run in the entrypoint:
+
+
+```bash
+/opt/nri/plugins/usernetes-identity-nri --host-min 2048 --host-max 4095 &
+```
+
+And probably we will derive those min/max values from a build arg from the environment.
+
+
+### Testing
 
 ```bash
 mkdir -p /tmp/u7s-test/{lower,upper,work,merged}
